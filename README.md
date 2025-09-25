@@ -109,6 +109,9 @@ The project was developed using Solidity, OpenZeppelin libraries, and is designe
 git clone <repository-url>
 cd <repository-folder>
 
+forge install OpenZeppelin/openzeppelin-contracts
+forge install foundry-rs/forge-std
+
 forge compile
 forge test
 
