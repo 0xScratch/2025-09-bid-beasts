@@ -16,11 +16,11 @@ contract BidBeasts is ERC721, Ownable(msg.sender) {
         uint256 _tokenId = CurrenTokenID;
         _safeMint(to, _tokenId);
         emit BidBeastsMinted(to, _tokenId);
-        CurrenTokenID++;
+        CurrenTokenID++; // @audit Look for this one, this function can trigger a reentrancy attack, it's just right now onlyOwner has saved it. But, there can be cases where it might call some other function based on this `currenTokenID` value.
         return _tokenId;
     }
 
-    function burn(uint256 _tokenId) public {
+    function burn(uint256 _tokenId) public { // @audit Clearly lacking a onlyOwner (or onlyholder) modifier, anyone can burn this one
         _burn(_tokenId);
         emit BidBeastsBurn(msg.sender, _tokenId);
     }

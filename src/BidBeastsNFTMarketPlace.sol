@@ -6,7 +6,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract BidBeastsNFTMarket is Ownable(msg.sender) {
     
-    BidBeasts public BBERC721;
+    BidBeasts public BBERC721; // @audit-info This could be immutable
 
     // --- Events ---
     event NftListed(uint256 tokenId, address seller, uint256 minPrice, uint256 buyNowPrice);
@@ -31,7 +31,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
     }
 
     // --- Constants ---
-    uint256 constant public S_AUCTION_EXTENSION_DURATION = 15 minutes;
+    uint256 constant public S_AUCTION_EXTENSION_DURATION = 15 minutes; // @note what's this? Is it the duration for an auction? Because in the docs, the duration was mentioned to be 3 days.
     uint256 constant public S_MIN_NFT_PRICE = 0.01 ether;
     uint256 constant public S_FEE_PERCENTAGE = 5;
     uint256 constant public S_MIN_BID_INCREMENT_PERCENTAGE = 5; 
@@ -40,7 +40,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
     uint256 public s_totalFee;
     mapping(uint256 => Listing) public listings;
     mapping(uint256 => Bid) public bids;
-    mapping(address => uint256) public failedTransferCredits;
+    mapping(address => uint256) public failedTransferCredits; // @note do explore this too
 
     // --- Modifiers ---
     modifier isListed(uint256 tokenId) {
@@ -69,7 +69,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
         require(BBERC721.ownerOf(tokenId) == msg.sender, "Not the owner");
         require(_minPrice >= S_MIN_NFT_PRICE, "Min price too low");
         if (_buyNowPrice > 0) {
-            require(_minPrice <= _buyNowPrice, "Min price cannot exceed buy now price");
+            require(_minPrice <= _buyNowPrice, "Min price cannot exceed buy now price"); // @note so according to this check, _buyNowPrice can be 0, but if it's not 0, it has to be >= _minPrice
         }
 
         BBERC721.transferFrom(msg.sender, address(this), tokenId);
@@ -108,7 +108,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
         address previousBidder = bids[tokenId].bidder;
         uint256 previousBidAmount = bids[tokenId].amount;
 
-        require(listing.seller != msg.sender, "Seller cannot bid");
+        require(listing.seller != msg.sender, "Seller cannot bid"); // @audit-info This doesn't prevent seller from bidding anyways, he can bid via another account.
 
         // auctionEnd == 0 => no bids yet => allowed
         // auctionEnd > 0 and block.timestamp >= auctionEnd => auction ended => block
@@ -125,7 +125,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
             listing.listed = false;
 
             if (previousBidder != address(0)) {
-                _payout(previousBidder, previousBidAmount);
+                _payout(previousBidder, previousBidAmount); // @note This payout is trying to make direct transfers, but if it fails, it credits the amount to failedTransferCredits...However this wasn't checked in tests, and hence try to explore it.
             }
 
             // NOTE: using internal finalize to do transfer/payouts. _executeSale will assume bids[tokenId] is the final winner.
@@ -140,7 +140,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
         }
 
         require(msg.sender != previousBidder, "Already highest bidder");
-        emit AuctionSettled(tokenId, msg.sender, listing.seller, msg.value);
+        emit AuctionSettled(tokenId, msg.sender, listing.seller, msg.value); // @audit-info Emitting this event here is misleading, as the auction isn't actually settled at this point. It should be emitted only when the auction is truly settled.
 
         // --- Regular Bidding Logic ---
         uint256 requiredAmount;
@@ -148,12 +148,12 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
         if (previousBidAmount == 0) {
 
             requiredAmount = listing.minPrice;
-            require(msg.value > requiredAmount, "First bid must be > min price");
-            listing.auctionEnd = block.timestamp + S_AUCTION_EXTENSION_DURATION;
+            require(msg.value > requiredAmount, "First bid must be > min price"); // @note Seems like contract is confused between >= and >, because on line 186, in settleAuction, it checks for >= minPrice
+            listing.auctionEnd = block.timestamp + S_AUCTION_EXTENSION_DURATION; // @note After every bid, auction somehow extended for 15 minutes? hmm..
             emit AuctionExtended(tokenId, listing.auctionEnd);
 
         } else {
-            requiredAmount = (previousBidAmount / 100) * (100 + S_MIN_BID_INCREMENT_PERCENTAGE);
+            requiredAmount = (previousBidAmount / 100) * (100 + S_MIN_BID_INCREMENT_PERCENTAGE); // @audit Not a right way to calculate, it can lead to rounding issues.
             require(msg.value >= requiredAmount, "Bid not high enough");
 
             uint256 timeLeft = 0;
@@ -210,7 +210,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
         listing.listed = false;
         delete bids[tokenId];
 
-        BBERC721.transferFrom(address(this), bid.bidder, tokenId);
+        BBERC721.transferFrom(address(this), bid.bidder, tokenId); // @note Looks like it doesn't revert on transfer, unless it have used `safeTransferFrom`
 
         uint256 fee = (bid.amount * S_FEE_PERCENTAGE) / 100;
         s_totalFee += fee;
@@ -226,7 +226,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
      */
     function _payout(address recipient, uint256 amount) internal {
         if (amount == 0) return;
-        (bool success, ) = payable(recipient).call{value: amount}("");
+        (bool success, ) = payable(recipient).call{value: amount}(""); // @audit Well, this seems to be a smart implementation...but unfortunately, it lets someone DoS the auction by making it expensive for the next person to even bid. The way it will be done is by making the `receive` function of the contract consume a lot of gas.
         if (!success) {
             failedTransferCredits[recipient] += amount;
         }
@@ -235,7 +235,7 @@ contract BidBeastsNFTMarket is Ownable(msg.sender) {
     /**
      * @notice Allows users to withdraw funds that failed to be transferred directly.
      */
-    function withdrawAllFailedCredits(address _receiver) external {
+    function withdrawAllFailedCredits(address _receiver) external { // @audit There's a clear vulnerability here, anyone can withdraw credits of any other user. It should be `msg.sender` instead of `_receiver`.
         uint256 amount = failedTransferCredits[_receiver];
         require(amount > 0, "No credits to withdraw");
         
