@@ -1,4 +1,4 @@
-# About Project
+## About Project
 
 This smart contract implements a basic auction-based NFT marketplace for the BidBeasts ERC721 token. It enables NFT owners to list their tokens for auction, accept bids from participants, and settle auctions with a platform fee mechanism.
 
@@ -24,7 +24,7 @@ This smart contract implements a basic auction-based NFT marketplace for the Bid
   - Moreover, let's say, 1 hour has passed, and no one noticed such loophole, and someone placed a bid after that 1 hour, then we do get an event emitted, saying that auction has extended. But in reality, that last bidder can easily call `settleAuction` the next second because according to the logic, `listing.auctionEnd + S_AUCTION_EXTENSION_DURATION` will be less than `block.timestamp`. As that's `listing.auctionEnd` was updated 1 hour before.
   - Overall, seller is at a big loss here, and the last bidder can easily get the NFT for a very low price.
 
-## Findings So Far
+## Findings So Far:
 
 1. **`BidBeasts_NFT_ERC721.sol`**:
     - First is that `burn` function in the `BidBeasts_NFT_ERC721.sol` contract, anyone can call the burn function
@@ -39,8 +39,109 @@ This smart contract implements a basic auction-based NFT marketplace for the Bid
     - Check the 4th and 5th points in the "Notes" section. Another issue.
     - Hmm, somehow my doubt related to `transferFrom` thing used for NFT transfer in `executeSale` was right. It leads to an issue where if the NFT is transferred to a contract that doesn't implement the `onERC721Received` function, the NFT will be locked in that contract forever. This is because `transferFrom` does not check if the recipient can handle ERC721 tokens, unlike `safeTransferFrom`. This could lead to loss of NFTs if users are not careful about where they transfer their tokens.
 
-## Learnings from this Audit
+## Learnings from this Audit:
 
 1. It's always better to check the other audits of similar protocol types. As sometimes, there's a lot of hints that can be taken from there.
 2. Please, Please take less time on reports. Honestly, I took way too much time on creating the findings report and stuff, more than I took to even search for vulnerabilities. I should definitely work on that.
 3. I still feel there are more vulnerabilities that could be found in here, but anyways, next time be more quick and efficient.
+
+## Mistakes I made in this audit:
+
+1. The [2nd finding](./findings.md/#missing-enforcement-of-the-3-days-auction-duration-allows-early-settlement-undermining-bidding-fairness-and-seller-revenue) was downgraded by the judge due to a dumb mistake of mine. I kind of mixed up the two vulnerabilities, one being the 3-days auction duration (documentation mismatch) and the other being the unintended early settlement due to the 15-minutes extension logic at line 164. The worse thing is, I do had this in mind but tried to be more smart and thought both should be clubbed together. But yeah, I was wrong. Gotta be more careful next time.
+
+## Appeals
+
+Greetings Sir, I just checked out your comment about listing my finding as an "edge case" of `M-04. Reentrancy During Buy-Now Purchase`, and I read the vulnerability details mentioned in the preliminary report. But, sorry to say, I completely disagree with that. Here's why (tbh, there's a lot to unpack here, so please bear with me):
+
+1. **M-04 looks like a reentrancy attempt, but it's not really an attack**:
+
+    - In `M-04`'s PoC, they show this:
+      
+      ```solidity
+        receive() external payable {
+          // Called when receiving bid refund
+          if (attackCount < 1) {
+              attackCount++;
+              // Try to manipulate state during refund
+      @>      // At this point, listing.listed is false but bids[tokenId] still exists
+              // This could cause unexpected behavior or DoS
+              market.placeBid{value: msg.value}(targetTokenId);
+          }
+        }
+      ```
+    
+    - But here's the thing: they (and others, mostly) missed that `placeBid` has the `isListed(tokenId)` modifier, which reverts if `listing.listed = false`. The refund goes to `failedTransferCredits`.
+
+    - Plus, running their PoC fails and `vm.expectRevert()` doesn't revert as expected.
+
+    - Here's a better PoC (similar to `M-04`):
+
+      ```solidity
+      function test_ReentrancyInBuyNow() public {
+        // Setup
+        MaliciousBidder attacker = new MaliciousBidder(address(market)); // MaliciousBidder contract as in M-04
+        vm.deal(address(attacker), 10 ether);
+        console.log("Attacker's address:", address(attacker));
+
+        address legitimateBuyer = makeAddr("LegitimateBuyer");
+        vm.deal(legitimateBuyer, 10 ether);
+        console.log("Legitimate buyer's address:", legitimateBuyer);
+
+        _mintNFT();
+        _listNFT();
+        
+        // 1. Attacker places initial bid
+        attacker.placeBid{value: 2 ether}(TOKEN_ID);
+        
+        // 2. Legitimate user tries to buy-now
+        vm.prank(legitimateBuyer);
+        // vm.expectRevert(); /// @audit Commenting this out as it never reverts anyway, unlike in M-04
+        market.placeBid{value: BUY_NOW_PRICE}(TOKEN_ID);
+        
+        address currentOwner = nft.ownerOf(TOKEN_ID);
+        console.log("Current owner of the NFT:", currentOwner);
+
+        console.log("failed transfer credit's amount of attacker:", market.failedTransferCredits(address(attacker)));
+      }
+      ```
+    
+    - Logs:
+    
+      ```log
+      Attacker's address: 0xF62849F9A0B5Bf2913b396098F7c7019b51A820a
+      Legitimate buyer's address: 0x5E5e2E4395CDa9E269F9FB2Ce27Db5A340A6E91f
+      Current owner of the NFT: 0x5E5e2E4395CDa9E269F9FB2Ce27Db5A340A6E91f
+      failed transfer credit's amount of attacker: 2000000000000000000
+      ```
+    
+    - See? The legitimate buyer gets the NFT, and the attacker achieves nothing. So, this is not an attack at all.
+
+    - Other reports call it "potential reentrancy" but don't prove impact. Here's a quick list:
+      - [#62](https://codehawks.cyfrin.io/c/2025-09-bid-beasts/s/62): Ties to `H-01` withdrawal bug; reentrancy alone isn't enough. And somehow, the auditor seems aware of it.
+      - [#89](https://codehawks.cyfrin.io/c/2025-09-bid-beasts/s/89): Reenters `placeBid` — fails as expected
+      - [#118](https://codehawks.cyfrin.io/c/2025-09-bid-beasts/s/118): Reenters `unlistNFT` — blocked by modifiers (`isListed` and `isSeller`); unclear gain even if get passed
+      - And so on... Honestly, at this point I don't really want to check them all, but I believe you got my point.
+    
+    - So, based on my understanding, `M-04` isn't a true security issue — maybe **Informational** or **Low** at best. And if this "reentrancy attempt" counts, why not flag the mint function in BidBeasts_NFT_ERC721? (I didn't submit it, and you know why.) 
+
+        ```solidity
+            function mint(address to) public onlyOwner returns (uint256) {
+            uint256 _tokenId = CurrenTokenID;
+        @>  _safeMint(to, _tokenId); // _safeMint, a open window through `onERC721Received`
+            emit BidBeastsMinted(to, _tokenId);
+        @>  CurrenTokenID++; // state updates later on
+            return _tokenId;
+        }
+        ```
+
+2. **Why `Economic DoS` finding is different from `reentrancy`, and better?**:
+
+    - Crediting auditors for spotting the ETH transfer is fair, but attaching my finding to it undermines what I reported.
+
+    - My finding doesn't involve state manipulation or reentrancy; it demonstrates an economic DoS or gas griefing with a clear PoC.
+
+    - Suggested fixes for reentrancy don't address my attack vector, so the real risk could be overlooked.
+
+    - Please also reconsider the severity of my Economic DoS — it may be **High**.
+
+Sorry for the long write-up, but I felt a bit of injustice at first and wanted to explain properly. If I'm off base, it'll be a good learning chance anyway.
